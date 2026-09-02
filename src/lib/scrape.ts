@@ -61,6 +61,9 @@ export async function scrapeHall(
   });
 
   if (!res.ok) {
+    const bodySnippet = (await res.text()).slice(0, 500);
+    console.error(`DEBUG ${hallName} ${res.status} headers:`, JSON.stringify(Object.fromEntries(res.headers.entries())));
+    console.error(`DEBUG ${hallName} body snippet:`, bodySnippet);
     throw new Error(`Failed to fetch ${hallName} menu (HTTP ${res.status})`);
   }
 
