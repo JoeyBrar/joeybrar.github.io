@@ -3,11 +3,6 @@ name: Deploy to GitHub Pages
 on:
   push:
     branches: [main]
-  schedule:
-    # Every 2 hours, to keep today's dining hall menu data fresh.
-    # GitHub Pages has no server, so freshness comes from re-running this
-    # build periodically rather than scraping per-request.
-    - cron: "0 */2 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -34,9 +29,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Fetch today's dining hall menus
-        run: npm run fetch-menus
 
       - name: Build static site
         run: npm run build
