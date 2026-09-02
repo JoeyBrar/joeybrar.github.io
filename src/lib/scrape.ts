@@ -61,10 +61,13 @@ export async function scrapeHall(
   });
 
   if (!res.ok) {
-    const bodySnippet = (await res.text()).slice(0, 500);
-    console.error(`DEBUG ${hallName} ${res.status} headers:`, JSON.stringify(Object.fromEntries(res.headers.entries())));
-    console.error(`DEBUG ${hallName} body snippet:`, bodySnippet);
-    throw new Error(`Failed to fetch ${hallName} menu (HTTP ${res.status})`);
+    const isCloudflareBlock =
+      res.status === 403 && res.headers.get("server") === "cloudflare";
+    throw new Error(
+      isCloudflareBlock
+        ? `Blocked by dining.umich.edu's Cloudflare bot protection (HTTP 403) — this host's IP is likely flagged as a bot/datacenter address.`
+        : `Failed to fetch ${hallName} menu (HTTP ${res.status})`
+    );
   }
 
   const html = await res.text();
