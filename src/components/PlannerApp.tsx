@@ -103,7 +103,7 @@ export default function PlannerApp() {
   const [fatG, setFatG] = useState(DEFAULT_FAT);
   const [mealsPerDay, setMealsPerDay] = useState(4);
   const [selectedHalls, setSelectedHalls] = useState<Set<string>>(
-    new Set(["mosher-jordan"])
+    new Set(["wolverine-village-dining-hall"])
   );
   const [excludedAllergens, setExcludedAllergens] = useState<Set<string>>(
     new Set()
