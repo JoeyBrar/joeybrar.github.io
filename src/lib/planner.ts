@@ -1,65 +1,13 @@
 import {
   DINING_HALLS,
   DayPlan,
+  MEAL_PERIODS,
   MealItemPick,
   MealPlan,
   MenuItem,
   PlanRequest,
   caloriesFromMacros,
 } from "./types";
-
-const PERIOD_ORDER = ["Breakfast", "Brunch", "Lunch", "Dinner", "Late Night"];
-const PERIOD_WEIGHT: Record<string, number> = {
-  Breakfast: 1,
-  Brunch: 1,
-  Lunch: 1.25,
-  Dinner: 1.25,
-  "Late Night": 0.8,
-};
-
-function periodSortKey(period: string): number {
-  const idx = PERIOD_ORDER.indexOf(period);
-  return idx === -1 ? PERIOD_ORDER.length : idx;
-}
-
-/** Spreads `mealsPerDay` slots across the periods actually available today,
- *  weighting lunch/dinner slightly heavier, using largest-remainder rounding. */
-function distributeMeals(periods: string[], mealsPerDay: number): string[] {
-  if (periods.length === 0) return [];
-  const sorted = [...periods].sort(
-    (a, b) => periodSortKey(a) - periodSortKey(b)
-  );
-  const weights = sorted.map((p) => PERIOD_WEIGHT[p] ?? 1);
-  const weightSum = weights.reduce((a, b) => a + b, 0);
-
-  const raw = weights.map((w) => (w / weightSum) * mealsPerDay);
-  const base = raw.map(Math.floor);
-  let remaining = mealsPerDay - base.reduce((a, b) => a + b, 0);
-
-  const remainders = raw
-    .map((r, i) => ({ i, frac: r - base[i] }))
-    .sort((a, b) => b.frac - a.frac);
-
-  for (let k = 0; k < remainders.length && remaining > 0; k++) {
-    base[remainders[k].i] += 1;
-    remaining--;
-  }
-  // if still remaining (mealsPerDay > sum because of rounding edge cases), dump into last period
-  let i = 0;
-  while (remaining > 0) {
-    base[i % base.length] += 1;
-    remaining--;
-    i++;
-  }
-
-  const slots: string[] = [];
-  sorted.forEach((p, idx) => {
-    for (let c = 0; c < base[idx]; c++) slots.push(p);
-  });
-  // ensure exactly mealsPerDay slots even if a period had 0 weight rounding issue
-  while (slots.length < mealsPerDay) slots.push(sorted[sorted.length - 1]);
-  return slots.slice(0, mealsPerDay);
-}
 
 interface Target {
   calories: number;
@@ -68,10 +16,14 @@ interface Target {
   fatG: number;
 }
 
+const ZERO_TARGET: Target = { calories: 0, proteinG: 0, carbG: 0, fatG: 0 };
+
 const MAX_TOTAL_UNITS = 16;
 const MAX_QTY_PER_ITEM = 3;
 const MAX_DISTINCT_ITEMS = 7;
 const REPEAT_PENALTY = 0.05;
+const NATURALNESS_WEIGHT = 0.00004; // scaled per-unit by that item's calorie contribution
+const HALL_NATURALNESS_WEIGHT = 0.0025;
 
 function weightedError(s: Target, t: Target): number {
   const wc = 1 / Math.max(t.calories, 1);
@@ -114,14 +66,12 @@ function solveMeal(
   usedItemIds: Set<string> = new Set()
 ): { picks: MealItemPick[]; totals: Target } {
   if (items.length === 0) {
-    return { picks: [], totals: { calories: 0, proteinG: 0, carbG: 0, fatG: 0 } };
+    return { picks: [], totals: ZERO_TARGET };
   }
 
   const qty = new Map<string, number>();
-  let totals: Target = { calories: 0, proteinG: 0, carbG: 0, fatG: 0 };
+  let totals: Target = ZERO_TARGET;
   let totalUnits = 0;
-
-  const NATURALNESS_WEIGHT = 0.00004; // scaled per-unit by that item's calorie contribution
 
   for (let step = 0; step < MAX_TOTAL_UNITS; step++) {
     const distinctCount = qty.size;
@@ -190,6 +140,89 @@ function solveMeal(
   return { picks, totals };
 }
 
+function avgNaturalnessOf(picks: MealItemPick[]): number {
+  const totalQty = picks.reduce((s, p) => s + p.qty, 0);
+  if (totalQty === 0) return 0;
+  return (
+    picks.reduce((s, p) => s + p.item.naturalness * p.qty, 0) / totalQty
+  );
+}
+
+function filterItems(
+  allItems: MenuItem[],
+  excludedAllergens: string[],
+  requiredDiets: string[]
+): MenuItem[] {
+  const excluded = new Set(excludedAllergens);
+  return allItems.filter((item) => {
+    if (item.allergens.some((a) => excluded.has(a))) return false;
+    if (requiredDiets.length > 0) {
+      return requiredDiets.every((d) => item.traits.includes(d));
+    }
+    return true;
+  });
+}
+
+interface HallCandidate {
+  hallSlug: string;
+  hallName: string;
+  items: MenuItem[];
+}
+
+/** Tries every candidate hall for this meal's period and keeps whichever
+ *  produces the best macro fit (naturalness as a secondary tiebreak). */
+function pickBestHallMeal(
+  candidates: HallCandidate[],
+  period: string,
+  target: Target,
+  usedItemIds: Set<string>
+): {
+  hallSlug: string;
+  hallName: string;
+  picks: MealItemPick[];
+  totals: Target;
+} | null {
+  let best: {
+    hallSlug: string;
+    hallName: string;
+    picks: MealItemPick[];
+    totals: Target;
+    score: number;
+  } | null = null;
+
+  for (const { hallSlug, hallName, items } of candidates) {
+    const periodItems = items.filter((i) => i.mealPeriod === period);
+    if (periodItems.length === 0) continue;
+
+    const { picks, totals } = solveMeal(periodItems, target, usedItemIds);
+    if (picks.length === 0) continue;
+
+    const score =
+      weightedError(totals, target) -
+      HALL_NATURALNESS_WEIGHT * avgNaturalnessOf(picks);
+
+    if (!best || score < best.score) {
+      best = { hallSlug, hallName, picks, totals, score };
+    }
+  }
+
+  return best;
+}
+
+function hallCandidatesFor(
+  filteredItems: MenuItem[],
+  hallSlugs: string[]
+): HallCandidate[] {
+  return hallSlugs
+    .map((slug) => DINING_HALLS.find((h) => h.slug === slug))
+    .filter((h): h is (typeof DINING_HALLS)[number] => !!h)
+    .map((hall) => ({
+      hallSlug: hall.slug,
+      hallName: hall.name,
+      items: filteredItems.filter((i) => i.hallSlug === hall.slug),
+    }));
+}
+
 /**
  * Pure, synchronous planner: takes the full pre-fetched menu item list
  * (all halls, generated offline by scripts/fetch-menus.ts and shipped as a
@@ -205,143 +238,159 @@ export function buildDayPlan(allItems: MenuItem[], req: PlanRequest): DayPlan {
     fatG: req.fatG,
   };
 
-  const hallEntries = req.hallSlugs
-    .map((slug) => DINING_HALLS.find((h) => h.slug === slug))
-    .filter((h): h is (typeof DINING_HALLS)[number] => !!h);
-
-  const hallItems = hallEntries.map((h) => ({
-    hall: h,
-    items: allItems.filter((i) => i.hallSlug === h.slug),
-  }));
-
-  const excluded = new Set(req.excludedAllergens);
-  const requiredDiets = req.requiredDiets;
-
-  const filteredByHall = hallItems.map(({ hall, items }) => ({
-    hall,
-    items: items.filter((item) => {
-      if (item.allergens.some((a) => excluded.has(a))) return false;
-      if (requiredDiets.length > 0) {
-        return requiredDiets.every((d) => item.traits.includes(d));
-      }
-      return true;
-    }),
-  }));
-
-  const availablePeriods = Array.from(
-    new Set(filteredByHall.flatMap(({ items }) => items.map((i) => i.mealPeriod)))
+  const filteredItems = filterItems(
+    allItems,
+    req.excludedAllergens,
+    req.requiredDiets
   );
 
-  if (availablePeriods.length === 0) {
+  // Expand each period's count into individual meal slots, in canonical
+  // Breakfast -> Lunch -> Dinner order regardless of the request's array order.
+  const slots = MEAL_PERIODS.flatMap((period) => {
+    const config = req.periods.find((p) => p.period === period);
+    if (!config || config.count <= 0 || config.hallSlugs.length === 0) {
+      return [];
+    }
+    return Array.from({ length: config.count }, () => ({
+      period,
+      hallSlugs: config.hallSlugs,
+    }));
+  });
+
+  const totalMeals = slots.length;
+
+  if (totalMeals === 0) {
     warnings.push(
-      "No menu items matched your dining hall + allergen/diet filters right now."
+      "No meals configured — assign at least one dining hall to a meal period."
     );
-    return {
-      meals: [],
-      dayTarget,
-      dayTotals: { calories: 0, proteinG: 0, carbG: 0, fatG: 0 },
-      warnings,
-    };
+    return { meals: [], dayTarget, dayTotals: ZERO_TARGET, warnings };
   }
 
-  const slots = distributeMeals(availablePeriods, req.mealsPerDay);
-
   const perMealTarget: Target = {
-    calories: dayTarget.calories / req.mealsPerDay,
-    proteinG: dayTarget.proteinG / req.mealsPerDay,
-    carbG: dayTarget.carbG / req.mealsPerDay,
-    fatG: dayTarget.fatG / req.mealsPerDay,
+    calories: dayTarget.calories / totalMeals,
+    proteinG: dayTarget.proteinG / totalMeals,
+    carbG: dayTarget.carbG / totalMeals,
+    fatG: dayTarget.fatG / totalMeals,
   };
 
   const usedItemIds = new Set<string>();
 
-  const meals: MealPlan[] = slots.map((period, idx) => {
-    let best: {
-      hall: (typeof DINING_HALLS)[number];
-      picks: MealItemPick[];
-      totals: Target;
-      score: number;
-    } | null = null;
-
-    for (const { hall, items } of filteredByHall) {
-      const periodItems = items.filter((i) => i.mealPeriod === period);
-      if (periodItems.length === 0) continue;
-
-      const { picks, totals } = solveMeal(
-        periodItems,
-        perMealTarget,
-        usedItemIds
-      );
-      if (picks.length === 0) continue;
-
-      const avgNaturalness =
-        picks.reduce((sum, p) => sum + p.item.naturalness * p.qty, 0) /
-        Math.max(
-          picks.reduce((sum, p) => sum + p.qty, 0),
-          1
-        );
-      const score =
-        weightedError(totals, perMealTarget) - 0.0025 * avgNaturalness;
-
-      if (!best || score < best.score) {
-        best = { hall, picks, totals, score };
-      }
-    }
+  const meals: MealPlan[] = slots.map((slot, idx) => {
+    const candidates = hallCandidatesFor(filteredItems, slot.hallSlugs);
+    const best = pickBestHallMeal(
+      candidates,
+      slot.period,
+      perMealTarget,
+      usedItemIds
+    );
 
     if (!best) {
       return {
         index: idx + 1,
-        period,
+        period: slot.period,
         hallSlug: null,
         hallName: null,
         picks: [],
-        totals: { calories: 0, proteinG: 0, carbG: 0, fatG: 0 },
+        totals: ZERO_TARGET,
         target: perMealTarget,
         avgNaturalness: 0,
-        unresolved: `No ${period} items available at your selected halls right now.`,
+        unresolved: `No ${slot.period} items available at your assigned hall(s) right now.`,
       };
     }
-
-    const totalQty = best.picks.reduce((s, p) => s + p.qty, 0);
-    const avgNaturalness =
-      best.picks.reduce((s, p) => s + p.item.naturalness * p.qty, 0) /
-      Math.max(totalQty, 1);
 
     best.picks.forEach((p) => usedItemIds.add(p.item.id));
 
     return {
       index: idx + 1,
-      period,
-      hallSlug: best.hall.slug,
-      hallName: best.hall.name,
+      period: slot.period,
+      hallSlug: best.hallSlug,
+      hallName: best.hallName,
       picks: best.picks,
       totals: best.totals,
       target: perMealTarget,
-      avgNaturalness: Math.round(avgNaturalness),
+      avgNaturalness: Math.round(avgNaturalnessOf(best.picks)),
     };
   });
 
-  const dayTotals = meals.reduce(
-    (acc, m) => ({
-      calories: acc.calories + m.totals.calories,
-      proteinG: acc.proteinG + m.totals.proteinG,
-      carbG: acc.carbG + m.totals.carbG,
-      fatG: acc.fatG + m.totals.fatG,
-    }),
-    { calories: 0, proteinG: 0, carbG: 0, fatG: 0 }
-  );
+  const dayTotals = sumMealTotals(meals);
+  warnings.push(...shortfallWarnings(dayTarget, dayTotals));
 
+  return { meals, dayTarget, dayTotals, warnings };
+}
+
+export function sumMealTotals(meals: MealPlan[]): Target {
+  return meals.reduce((acc, m) => addVec(acc, m.totals), ZERO_TARGET);
+}
+
+export function shortfallWarnings(dayTarget: Target, dayTotals: Target): string[] {
   const calorieRatio = dayTotals.calories / Math.max(dayTarget.calories, 1);
   const proteinRatio = dayTotals.proteinG / Math.max(dayTarget.proteinG, 1);
   if (calorieRatio < 0.75 || proteinRatio < 0.75) {
-    warnings.push(
+    return [
       `Your dining hall + allergen/diet filters left pretty limited real options today, so this plan only reaches ~${Math.round(
         calorieRatio * 100
       )}% of your calorie target and ~${Math.round(
         proteinRatio * 100
-      )}% of your protein target. Try adding another dining hall or relaxing a filter.`
-    );
+      )}% of your protein target. Try adding another dining hall or relaxing a filter.`,
+    ];
+  }
+  return [];
+}
+
+/**
+ * Re-solves a single meal, preferring items that weren't in its previous
+ * picks (hard exclusion first; falls back to the softer repeat-penalty if
+ * excluding entirely leaves no viable combo for that hall selection).
+ */
+export function regenerateMeal(
+  allItems: MenuItem[],
+  req: PlanRequest,
+  meal: MealPlan
+): MealPlan {
+  const filteredItems = filterItems(
+    allItems,
+    req.excludedAllergens,
+    req.requiredDiets
+  );
+
+  const config = req.periods.find((p) => p.period === meal.period);
+  const hallSlugs = config?.hallSlugs ?? [];
+  const candidates = hallCandidatesFor(filteredItems, hallSlugs);
+
+  const previousIds = new Set(meal.picks.map((p) => p.item.id));
+
+  const excludedCandidates: HallCandidate[] = candidates.map((c) => ({
+    ...c,
+    items: c.items.filter((i) => !previousIds.has(i.id)),
+  }));
+
+  let best = pickBestHallMeal(
+    excludedCandidates,
+    meal.period,
+    meal.target,
+    new Set()
+  );
+
+  // If hard exclusion leaves nothing viable (e.g. only one item fits at that
+  // hall), fall back to allowing repeats but still nudging away from them.
+  if (!best) {
+    best = pickBestHallMeal(candidates, meal.period, meal.target, previousIds);
   }
 
-  return { meals, dayTarget, dayTotals, warnings };
+  if (!best) {
+    return {
+      ...meal,
+      unresolved: `No other ${meal.period} items available at your assigned hall(s) right now.`,
+    };
+  }
+
+  return {
+    ...meal,
+    hallSlug: best.hallSlug,
+    hallName: best.hallName,
+    picks: best.picks,
+    totals: best.totals,
+    avgNaturalness: Math.round(avgNaturalnessOf(best.picks)),
+    unresolved: undefined,
+  };
 }

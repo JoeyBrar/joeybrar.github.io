@@ -43,7 +43,13 @@ function naturalnessColor(score: number): string {
   return "text-red-500 dark:text-red-400";
 }
 
-function MealCard({ meal }: { meal: MealPlan }) {
+function MealCard({
+  meal,
+  onRegenerate,
+}: {
+  meal: MealPlan;
+  onRegenerate: () => void;
+}) {
   return (
     <div className="rounded-xl border border-gray-200 dark:border-gray-800 p-4">
       <div className="flex items-baseline justify-between gap-2 flex-wrap mb-3">
@@ -55,15 +61,24 @@ function MealCard({ meal }: { meal: MealPlan }) {
             {meal.hallName ?? "No hall available"}
           </h3>
         </div>
-        {meal.picks.length > 0 && (
-          <span
-            className={`text-sm font-medium ${naturalnessColor(
-              meal.avgNaturalness
-            )}`}
+        <div className="flex items-center gap-3">
+          {meal.picks.length > 0 && (
+            <span
+              className={`text-sm font-medium ${naturalnessColor(
+                meal.avgNaturalness
+              )}`}
+            >
+              Naturalness {meal.avgNaturalness}/100
+            </span>
+          )}
+          <button
+            onClick={onRegenerate}
+            className="text-xs font-medium px-2.5 py-1 rounded-lg border border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900"
+            title="Don't like this meal? Try a different combo."
           >
-            Naturalness {meal.avgNaturalness}/100
-          </span>
-        )}
+            ↻ Try again
+          </button>
+        </div>
       </div>
 
       {meal.unresolved ? (
@@ -133,7 +148,13 @@ function MealCard({ meal }: { meal: MealPlan }) {
   );
 }
 
-export default function PlanResults({ plan }: { plan: DayPlan }) {
+export default function PlanResults({
+  plan,
+  onRegenerateMeal,
+}: {
+  plan: DayPlan;
+  onRegenerateMeal: (mealIndex: number) => void;
+}) {
   return (
     <div className="space-y-6">
       {plan.warnings.length > 0 && (
@@ -178,7 +199,11 @@ export default function PlanResults({ plan }: { plan: DayPlan }) {
 
       <div className="space-y-4">
         {plan.meals.map((meal) => (
-          <MealCard key={meal.index} meal={meal} />
+          <MealCard
+            key={meal.index}
+            meal={meal}
+            onRegenerate={() => onRegenerateMeal(meal.index)}
+          />
         ))}
       </div>
     </div>

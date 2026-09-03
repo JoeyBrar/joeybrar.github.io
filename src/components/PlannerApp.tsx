@@ -1,13 +1,16 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { buildDayPlan } from "@/lib/planner";
+import { useMemo, useState, useEffect } from "react";
+import { buildDayPlan, regenerateMeal, sumMealTotals, shortfallWarnings } from "@/lib/planner";
 import {
   ALLERGEN_OPTIONS,
   DayPlan,
   DIET_OPTIONS,
   DINING_HALLS,
+  MEAL_PERIODS,
+  MealPeriodName,
   MenuItem,
+  PlanRequest,
   caloriesFromMacros,
 } from "@/lib/types";
 import PlanResults from "./PlanResults";
@@ -18,9 +21,23 @@ interface MenuDataFile {
   errors: string[];
 }
 
+interface PeriodState {
+  count: number;
+  hallSlugs: Set<string>;
+}
+
 const DEFAULT_PROTEIN = 190;
 const DEFAULT_CARB = 450;
 const DEFAULT_FAT = 90;
+const DEFAULT_HALL = "wolverine-village-dining-hall";
+
+function defaultPeriodState(): Record<MealPeriodName, PeriodState> {
+  return {
+    Breakfast: { count: 1, hallSlugs: new Set([DEFAULT_HALL]) },
+    Lunch: { count: 1, hallSlugs: new Set([DEFAULT_HALL]) },
+    Dinner: { count: 1, hallSlugs: new Set([DEFAULT_HALL]) },
+  };
+}
 
 function Slider({
   label,
@@ -97,20 +114,67 @@ function CheckboxGrid({
   );
 }
 
+function PeriodCard({
+  period,
+  state,
+  onCountChange,
+  onToggleHall,
+}: {
+  period: MealPeriodName;
+  state: PeriodState;
+  onCountChange: (n: number) => void;
+  onToggleHall: (hallSlug: string) => void;
+}) {
+  return (
+    <section className="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <h2 className="font-semibold">{period}</h2>
+        <div className="flex gap-1">
+          {[0, 1, 2, 3].map((n) => (
+            <button
+              key={n}
+              onClick={() => onCountChange(n)}
+              className={`w-8 h-8 rounded-lg text-sm border ${
+                state.count === n
+                  ? "bg-gray-900 text-white border-gray-900 dark:bg-gray-100 dark:text-gray-900"
+                  : "border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900"
+              }`}
+            >
+              {n}
+            </button>
+          ))}
+        </div>
+      </div>
+      {state.count > 0 && (
+        <>
+          <CheckboxGrid
+            options={DINING_HALLS.map((h) => ({ key: h.slug, label: h.name }))}
+            selected={state.hallSlugs}
+            onToggle={onToggleHall}
+          />
+          {state.hallSlugs.size === 0 && (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              Pick at least one hall for {period}, or set the count back to 0.
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
 export default function PlannerApp() {
   const [proteinG, setProteinG] = useState(DEFAULT_PROTEIN);
   const [carbG, setCarbG] = useState(DEFAULT_CARB);
   const [fatG, setFatG] = useState(DEFAULT_FAT);
-  const [mealsPerDay, setMealsPerDay] = useState(4);
-  const [selectedHalls, setSelectedHalls] = useState<Set<string>>(
-    new Set(["wolverine-village-dining-hall"])
-  );
+  const [periodState, setPeriodState] = useState(defaultPeriodState);
   const [excludedAllergens, setExcludedAllergens] = useState<Set<string>>(
     new Set()
   );
   const [requiredDiets, setRequiredDiets] = useState<Set<string>>(new Set());
 
   const [plan, setPlan] = useState<DayPlan | null>(null);
+  const [lastReq, setLastReq] = useState<PlanRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const [menuData, setMenuData] = useState<MenuDataFile | null>(null);
@@ -149,6 +213,11 @@ export default function PlannerApp() {
     [proteinG, carbG, fatG]
   );
 
+  const totalMeals = useMemo(
+    () => MEAL_PERIODS.reduce((sum, p) => sum + periodState[p].count, 0),
+    [periodState]
+  );
+
   function toggleFromSet(
     set: Set<string>,
     setSet: (s: Set<string>) => void,
@@ -160,26 +229,52 @@ export default function PlannerApp() {
     setSet(next);
   }
 
+  function setPeriodCount(period: MealPeriodName, count: number) {
+    setPeriodState((prev) => ({ ...prev, [period]: { ...prev[period], count } }));
+  }
+
+  function toggleHallForPeriod(period: MealPeriodName, hallSlug: string) {
+    setPeriodState((prev) => {
+      const next = new Set(prev[period].hallSlugs);
+      if (next.has(hallSlug)) next.delete(hallSlug);
+      else next.add(hallSlug);
+      return { ...prev, [period]: { ...prev[period], hallSlugs: next } };
+    });
+  }
+
   function generatePlan() {
     setError(null);
-    if (selectedHalls.size === 0) {
-      setError("Select at least one dining hall.");
-      return;
-    }
     if (!menuData) {
       setError("Menu data isn't loaded yet.");
       return;
     }
-    const result = buildDayPlan(menuData.items, {
+    const req: PlanRequest = {
       proteinG,
       carbG,
       fatG,
-      mealsPerDay,
-      hallSlugs: Array.from(selectedHalls),
+      periods: MEAL_PERIODS.map((period) => ({
+        period,
+        count: periodState[period].count,
+        hallSlugs: Array.from(periodState[period].hallSlugs),
+      })),
       excludedAllergens: Array.from(excludedAllergens),
       requiredDiets: Array.from(requiredDiets),
-    });
-    setPlan(result);
+    };
+    setLastReq(req);
+    setPlan(buildDayPlan(menuData.items, req));
+  }
+
+  function handleRegenerateMeal(mealIndex: number) {
+    if (!menuData || !plan || !lastReq) return;
+    const meal = plan.meals.find((m) => m.index === mealIndex);
+    if (!meal) return;
+    const updatedMeal = regenerateMeal(menuData.items, lastReq, meal);
+    const meals = plan.meals.map((m) =>
+      m.index === mealIndex ? updatedMeal : m
+    );
+    const dayTotals = sumMealTotals(meals);
+    const warnings = shortfallWarnings(plan.dayTarget, dayTotals);
+    setPlan({ ...plan, meals, dayTotals, warnings });
   }
 
   return (
@@ -187,9 +282,8 @@ export default function PlannerApp() {
       <header>
         <h1 className="text-2xl font-bold">M|Dining Bulk Planner</h1>
         <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
-          Set your macros, pick your dining halls and allergens, and get
-          today&apos;s meal plan built from M|Dining&apos;s posted menus and
-          nutrition facts, refreshed periodically throughout the day.
+          Set your macros, assign a dining hall to each meal, and get a plan
+          built from M|Dining&apos;s posted menus and nutrition facts.
         </p>
       </header>
 
@@ -230,33 +324,26 @@ export default function PlannerApp() {
         />
       </section>
 
-      <section className="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3">
-        <h2 className="font-semibold">Meals per day</h2>
-        <div className="flex gap-2">
-          {[2, 3, 4, 5, 6].map((n) => (
-            <button
-              key={n}
-              onClick={() => setMealsPerDay(n)}
-              className={`px-3 py-1.5 rounded-lg text-sm border ${
-                mealsPerDay === n
-                  ? "bg-gray-900 text-white border-gray-900 dark:bg-gray-100 dark:text-gray-900"
-                  : "border-gray-200 dark:border-gray-800 hover:bg-gray-50 dark:hover:bg-gray-900"
-              }`}
-            >
-              {n}
-            </button>
+      <div>
+        <h2 className="font-semibold mb-3">
+          Meals today
+          <span className="font-normal text-sm text-gray-500 dark:text-gray-400">
+            {" "}
+            &middot; {totalMeals} total
+          </span>
+        </h2>
+        <div className="space-y-3">
+          {MEAL_PERIODS.map((period) => (
+            <PeriodCard
+              key={period}
+              period={period}
+              state={periodState[period]}
+              onCountChange={(n) => setPeriodCount(period, n)}
+              onToggleHall={(hallSlug) => toggleHallForPeriod(period, hallSlug)}
+            />
           ))}
         </div>
-      </section>
-
-      <section className="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3">
-        <h2 className="font-semibold">Dining halls you&apos;ll visit today</h2>
-        <CheckboxGrid
-          options={DINING_HALLS.map((h) => ({ key: h.slug, label: h.name }))}
-          selected={selectedHalls}
-          onToggle={(k) => toggleFromSet(selectedHalls, setSelectedHalls, k)}
-        />
-      </section>
+      </div>
 
       <section className="rounded-xl border border-gray-200 dark:border-gray-800 p-4 space-y-3">
         <h2 className="font-semibold">Allergens to avoid</h2>
@@ -283,7 +370,7 @@ export default function PlannerApp() {
 
       <button
         onClick={generatePlan}
-        disabled={dataLoading || !!dataError}
+        disabled={dataLoading || !!dataError || totalMeals === 0}
         className="w-full py-3 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-semibold transition-colors"
       >
         {dataLoading
@@ -299,7 +386,9 @@ export default function PlannerApp() {
             minute: "2-digit",
             month: "short",
             day: "numeric",
-          })}
+          })}{" "}
+          &mdash; not necessarily today (see README for why this can&apos;t
+          auto-refresh)
           {menuData.errors.length > 0 && (
             <> &middot; {menuData.errors.length} hall(s) failed to refresh</>
           )}
@@ -312,7 +401,9 @@ export default function PlannerApp() {
         </div>
       )}
 
-      {plan && <PlanResults plan={plan} />}
+      {plan && (
+        <PlanResults plan={plan} onRegenerateMeal={handleRegenerateMeal} />
+      )}
 
       <p className="text-xs text-gray-400 pt-4">
         &ldquo;Naturalness&rdquo; is a heuristic score (0-100) built from

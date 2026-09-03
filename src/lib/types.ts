@@ -109,9 +109,18 @@ export function caloriesFromMacros(m: MacroTargets): number {
   return Math.round(m.proteinG * 4 + m.carbG * 4 + m.fatG * 9);
 }
 
-export interface PlanRequest extends MacroTargets {
-  mealsPerDay: number;
+// M|Dining's data only ever carries these three periods in practice.
+export const MEAL_PERIODS = ["Breakfast", "Lunch", "Dinner"] as const;
+export type MealPeriodName = (typeof MEAL_PERIODS)[number];
+
+export interface PeriodConfig {
+  period: MealPeriodName;
+  count: number;
   hallSlugs: string[];
+}
+
+export interface PlanRequest extends MacroTargets {
+  periods: PeriodConfig[];
   excludedAllergens: string[];
   requiredDiets: string[];
 }

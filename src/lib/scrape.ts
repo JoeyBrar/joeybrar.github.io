@@ -109,8 +109,12 @@ export async function scrapeHall(
           nutritionDiv = $itemLi.find(".nutrition");
         }
         const table = nutritionDiv.find("table.nutrition-facts").first();
-        const nutrition =
-          table.length > 0 ? parseNutritionTable($, table) : emptyNutrition();
+        // Placeholder cards for closed stations (e.g. "No Service at this
+        // Time") render without a nutrition-facts table at all — skip them,
+        // they aren't real orderable food and would otherwise show up as
+        // free zero-macro filler in the solver.
+        if (table.length === 0) return;
+        const nutrition = parseNutritionTable($, table);
 
         const traits = classes
           .filter((c) => c.startsWith("trait-"))
